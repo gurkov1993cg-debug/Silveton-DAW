@@ -33,6 +33,16 @@ jobs:
           mkdir _silveton_src
           ditto -x -k SilvetonDAW-source.zip _silveton_src
           test -f _silveton_src/SilvetonDAW/CMakeLists.txt
+          test -f _silveton_src/SilvetonDAW/src/DiskStream.cpp
+          test -f _silveton_src/SilvetonDAW/tests/Session256Tests.cpp
+          test -f _silveton_src/SilvetonDAW/tests/AdvancedAudioTests.cpp
+
+      - name: Verify macOS 10.13 source contract
+        run: |
+          if grep -R --line-number --include='*.h' --include='*.cpp' 'std::filesystem' _silveton_src/SilvetonDAW/include _silveton_src/SilvetonDAW/src _silveton_src/SilvetonDAW/tests; then
+            echo 'std::filesystem is not allowed for the macOS 10.13 target'
+            exit 1
+          fi
 
       - name: Configure Intel macOS build
         run: |
@@ -44,12 +54,16 @@ jobs:
       - name: Build Release
         run: cmake --build build --config Release --parallel 2
 
-      - name: Run regression tests
+      - name: Run Release regression tests
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Configure ASan + UBSan Intel build
         run: |
-          cmake -S _silveton_src/SilvetonDAW -B build-san             -G Xcode             -DCMAKE_OSX_ARCHITECTURES=x86_64             -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13             -DSILVETON_ENABLE_SANITIZERS=ON
+          cmake -S _silveton_src/SilvetonDAW -B build-san \
+            -G Xcode \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DSILVETON_ENABLE_SANITIZERS=ON
 
       - name: Build ASan + UBSan
         run: cmake --build build-san --config Debug --parallel 2
@@ -65,19 +79,31 @@ jobs:
           file build/Release/silveton_coreaudio_smoke
           file build/Release/silveton_realtime_tests
           file build/Release/silveton_recording_tests
+          file build/Release/silveton_256_track_tests
+          file build/Release/silveton_disk_format_tests
+          file build/Release/silveton_advanced_audio_tests
           file build/Release/libsilveton_audio_core.a
           lipo -info build/Release/silveton_coreaudio_smoke
           lipo -info build/Release/silveton_recording_tests
+          lipo -info build/Release/silveton_256_track_tests
+          lipo -info build/Release/silveton_disk_format_tests
+          lipo -info build/Release/silveton_advanced_audio_tests
           otool -l build/Release/silveton_coreaudio_smoke | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          otool -l build/Release/silveton_256_track_tests | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
 
       - name: Package validation binaries
         run: |
           rm -rf artifact
           mkdir artifact
           cp build/Release/silveton_coreaudio_smoke artifact/
+          cp build/Release/silveton_256_track_tests artifact/
+          cp build/Release/silveton_disk_format_tests artifact/
+          cp build/Release/silveton_advanced_audio_tests artifact/
           cp build/Release/libsilveton_audio_core.a artifact/
           cp _silveton_src/SilvetonDAW/COREAUDIO_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/RECORDING_STATUS.md artifact/
+          cp _silveton_src/SilvetonDAW/SESSION_256_STATUS.md artifact/
+          cp _silveton_src/SilvetonDAW/ADVANCED_AUDIO_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
           ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-CoreAudio-Intel-validation.zip
 
