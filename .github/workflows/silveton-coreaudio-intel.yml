@@ -1,19 +1,18 @@
-name: Silveton CoreAudio Intel Validation
+name: Silveton Intel Full VST3 Validation
 
 on:
   workflow_dispatch:
   push:
     paths:
       - 'SilvetonDAW-source.zip'
-      - '.github/workflows/silveton-coreaudio-intel.yml'
 
 jobs:
-  coreaudio-intel:
+  intel-vst3:
     runs-on: macos-15-intel
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout Silveton package
         uses: actions/checkout@v4
 
       - name: Select Xcode 16.4
@@ -21,95 +20,147 @@ jobs:
 
       - name: Show toolchain
         run: |
+          set -euxo pipefail
           sw_vers
           xcodebuild -version
           cmake --version
           clang++ --version
+          uname -m
 
-      - name: Extract source
+      - name: Extract source ZIP
         run: |
+          set -euxo pipefail
           test -f SilvetonDAW-source.zip
           rm -rf _silveton_src
           mkdir _silveton_src
           ditto -x -k SilvetonDAW-source.zip _silveton_src
           test -f _silveton_src/SilvetonDAW/CMakeLists.txt
-          test -f _silveton_src/SilvetonDAW/src/DiskStream.cpp
-          test -f _silveton_src/SilvetonDAW/tests/Session256Tests.cpp
-          test -f _silveton_src/SilvetonDAW/tests/AdvancedAudioTests.cpp
+          test -f _silveton_src/SilvetonDAW/src/Vst3Host.cpp
+          test -f _silveton_src/SilvetonDAW/src/Vst3Runtime.cpp
+          test -f _silveton_src/SilvetonDAW/src/ProcessorGraph.cpp
+          test -f _silveton_src/SilvetonDAW/tests/Vst3HostIntegrationTests.cpp
+          test -f _silveton_src/SilvetonDAW/tests/vst3/SilvetonHostTest.cpp
+
+      - name: Checkout exact pinned Steinberg VST3 SDK
+        run: |
+          set -euxo pipefail
+          rm -rf vst3sdk
+          git clone https://github.com/steinbergmedia/vst3sdk.git vst3sdk
+          git -C vst3sdk checkout 3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96
+          git -C vst3sdk submodule update --init --recursive
+          test "$(git -C vst3sdk rev-parse HEAD)" = "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96"
+          test "$(git -C vst3sdk/public.sdk rev-parse HEAD)" = "586dc5e6c8012c3e4b01c79389375cbe96bdb1da"
+          test "$(git -C vst3sdk/pluginterfaces rev-parse HEAD)" = "4f547e8e102b47de4a8b8aaf343c73b700786372"
+          test "$(git -C vst3sdk/cmake rev-parse HEAD)" = "054c9143cbb8d47fc4694e473f2ee3b4d951a8f5"
 
       - name: Verify macOS 10.13 source contract
         run: |
-          if grep -R --line-number --include='*.h' --include='*.cpp' 'std::filesystem' _silveton_src/SilvetonDAW/include _silveton_src/SilvetonDAW/src _silveton_src/SilvetonDAW/tests; then
+          set -euxo pipefail
+          if grep -R --line-number --include='*.h' --include='*.cpp' --include='*.mm' 'std::filesystem' \
+              _silveton_src/SilvetonDAW/include _silveton_src/SilvetonDAW/src _silveton_src/SilvetonDAW/tests; then
             echo 'std::filesystem is not allowed for the macOS 10.13 target'
             exit 1
           fi
 
-      - name: Configure Intel macOS build
+      - name: Configure Release with production VST3 host
         run: |
+          set -euxo pipefail
           cmake -S _silveton_src/SilvetonDAW -B build \
             -G Xcode \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DSILVETON_ENABLE_VST3_HOST=ON \
+            -DSILVETON_BUILD_VST3_VALIDATOR=ON \
+            -DSILVETON_VST3_SDK_DIR="$GITHUB_WORKSPACE/vst3sdk" \
+            -DSMTG_BUILD_UNIVERSAL_BINARY=OFF \
+            -DSMTG_CREATE_PLUGIN_LINK=OFF
 
       - name: Build Release
         run: cmake --build build --config Release --parallel 2
 
-      - name: Run Release regression tests
+      - name: Run complete Release regression suite
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Configure ASan + UBSan Intel build
+      - name: Run Steinberg validator explicitly on deterministic fixture
         run: |
-          cmake -S _silveton_src/SilvetonDAW -B build-san \
-            -G Xcode \
-            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
-            -DSILVETON_ENABLE_SANITIZERS=ON
+          set -euxo pipefail
+          PLUGIN="$(find build -type d -name 'SilvetonHostTest.vst3' -print -quit)"
+          VALIDATOR="$(find build -type f -name validator -perm -111 -print -quit)"
+          test -n "$PLUGIN"
+          test -n "$VALIDATOR"
+          "$VALIDATOR" "$PLUGIN"
+          echo "PLUGIN=$PLUGIN" >> "$GITHUB_ENV"
 
-      - name: Build ASan + UBSan
-        run: cmake --build build-san --config Debug --parallel 2
-
-      - name: Run ASan + UBSan regression tests
-        run: ctest --test-dir build-san -C Debug --output-on-failure
+      - name: Verify VST3 bundle signing and executable
+        run: |
+          set -euxo pipefail
+          test -d "$PLUGIN"
+          codesign --verify --deep --strict --verbose=2 "$PLUGIN"
+          PLUGIN_BIN="$(find "$PLUGIN/Contents/MacOS" -type f -perm -111 -print -quit)"
+          test -n "$PLUGIN_BIN"
+          file "$PLUGIN_BIN"
+          lipo -info "$PLUGIN_BIN"
+          otool -l "$PLUGIN_BIN" | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          nm -gU "$PLUGIN_BIN" | grep GetPluginFactory
 
       - name: Run CoreAudio enumeration smoke
         run: ./build/Release/silveton_coreaudio_smoke
 
-      - name: Verify Intel executables and deployment target
+      - name: Verify Intel host executables and deployment target
         run: |
-          file build/Release/silveton_coreaudio_smoke
-          file build/Release/silveton_realtime_tests
-          file build/Release/silveton_recording_tests
-          file build/Release/silveton_256_track_tests
-          file build/Release/silveton_disk_format_tests
-          file build/Release/silveton_advanced_audio_tests
-          file build/Release/libsilveton_audio_core.a
-          lipo -info build/Release/silveton_coreaudio_smoke
-          lipo -info build/Release/silveton_recording_tests
-          lipo -info build/Release/silveton_256_track_tests
-          lipo -info build/Release/silveton_disk_format_tests
-          lipo -info build/Release/silveton_advanced_audio_tests
-          otool -l build/Release/silveton_coreaudio_smoke | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
-          otool -l build/Release/silveton_256_track_tests | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          set -euxo pipefail
+          for f in \
+            build/Release/silveton_coreaudio_smoke \
+            build/Release/silveton_vst3_scanner \
+            build/Release/silveton_vst3_host_integration_tests \
+            build/Release/silveton_vst3_infrastructure_tests; do
+            test -f "$f"
+            file "$f"
+            lipo -info "$f"
+            otool -l "$f" | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          done
 
-      - name: Package validation binaries
+      - name: Configure ASan + UBSan VST3 build
         run: |
-          rm -rf artifact
+          set -euxo pipefail
+          cmake -S _silveton_src/SilvetonDAW -B build-san \
+            -G Xcode \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DSILVETON_ENABLE_SANITIZERS=ON \
+            -DSILVETON_ENABLE_VST3_HOST=ON \
+            -DSILVETON_BUILD_VST3_VALIDATOR=OFF \
+            -DSILVETON_VST3_SDK_DIR="$GITHUB_WORKSPACE/vst3sdk" \
+            -DSMTG_BUILD_UNIVERSAL_BINARY=OFF \
+            -DSMTG_CREATE_PLUGIN_LINK=OFF
+
+      - name: Build ASan + UBSan
+        run: cmake --build build-san --config Debug --parallel 2
+
+      - name: Run ASan + UBSan regression suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-san -C Debug --output-on-failure
+
+      - name: Package VST3 layer validation artifact
+        run: |
+          set -euxo pipefail
+          rm -rf artifact SilvetonDAW-VST3-Intel-validation.zip
           mkdir artifact
+          cp build/Release/silveton_vst3_scanner artifact/
+          cp build/Release/silveton_vst3_host_integration_tests artifact/
+          cp build/Release/silveton_vst3_infrastructure_tests artifact/
           cp build/Release/silveton_coreaudio_smoke artifact/
-          cp build/Release/silveton_256_track_tests artifact/
-          cp build/Release/silveton_disk_format_tests artifact/
-          cp build/Release/silveton_advanced_audio_tests artifact/
           cp build/Release/libsilveton_audio_core.a artifact/
-          cp _silveton_src/SilvetonDAW/COREAUDIO_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/RECORDING_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/SESSION_256_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/ADVANCED_AUDIO_STATUS.md artifact/
+          ditto "$PLUGIN" "artifact/SilvetonHostTest.vst3"
+          cp _silveton_src/SilvetonDAW/VST3_LAYER_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
-          ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-CoreAudio-Intel-validation.zip
+          ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-VST3-Intel-validation.zip
 
       - name: Upload validation artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SilvetonDAW-CoreAudio-Intel-validation
-          path: SilvetonDAW-CoreAudio-Intel-validation.zip
+          name: SilvetonDAW-VST3-Intel-validation
+          path: SilvetonDAW-VST3-Intel-validation.zip
           if-no-files-found: error
