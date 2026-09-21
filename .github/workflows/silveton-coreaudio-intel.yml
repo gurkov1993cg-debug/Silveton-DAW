@@ -103,17 +103,40 @@ jobs:
           otool -l "$PLUGIN_BIN" | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
           nm -gU "$PLUGIN_BIN" | grep GetPluginFactory
 
+      - name: Resolve Release output paths
+        run: |
+          set -euxo pipefail
+          CORE_AUDIO_SMOKE="$(find build -type f -name 'silveton_coreaudio_smoke' -perm -111 -print -quit)"
+          VST3_SCANNER="$(find build -type f -name 'silveton_vst3_scanner' -perm -111 -print -quit)"
+          VST3_HOST_TESTS="$(find build -type f -name 'silveton_vst3_host_integration_tests' -perm -111 -print -quit)"
+          VST3_INFRA_TESTS="$(find build -type f -name 'silveton_vst3_infrastructure_tests' -perm -111 -print -quit)"
+          AUDIO_CORE_LIB="$(find build -type f -name 'libsilveton_audio_core.a' -print -quit)"
+
+          test -n "$CORE_AUDIO_SMOKE"
+          test -n "$VST3_SCANNER"
+          test -n "$VST3_HOST_TESTS"
+          test -n "$VST3_INFRA_TESTS"
+          test -n "$AUDIO_CORE_LIB"
+
+          echo "CORE_AUDIO_SMOKE=$CORE_AUDIO_SMOKE" >> "$GITHUB_ENV"
+          echo "VST3_SCANNER=$VST3_SCANNER" >> "$GITHUB_ENV"
+          echo "VST3_HOST_TESTS=$VST3_HOST_TESTS" >> "$GITHUB_ENV"
+          echo "VST3_INFRA_TESTS=$VST3_INFRA_TESTS" >> "$GITHUB_ENV"
+          echo "AUDIO_CORE_LIB=$AUDIO_CORE_LIB" >> "$GITHUB_ENV"
+
       - name: Run CoreAudio enumeration smoke
-        run: ./build/Release/silveton_coreaudio_smoke
+        run: |
+          set -euxo pipefail
+          "$CORE_AUDIO_SMOKE"
 
       - name: Verify Intel host executables and deployment target
         run: |
           set -euxo pipefail
           for f in \
-            build/Release/silveton_coreaudio_smoke \
-            build/Release/silveton_vst3_scanner \
-            build/Release/silveton_vst3_host_integration_tests \
-            build/Release/silveton_vst3_infrastructure_tests; do
+            "$CORE_AUDIO_SMOKE" \
+            "$VST3_SCANNER" \
+            "$VST3_HOST_TESTS" \
+            "$VST3_INFRA_TESTS"; do
             test -f "$f"
             file "$f"
             lipo -info "$f"
@@ -148,11 +171,11 @@ jobs:
           set -euxo pipefail
           rm -rf artifact SilvetonDAW-VST3-Intel-validation.zip
           mkdir artifact
-          cp build/Release/silveton_vst3_scanner artifact/
-          cp build/Release/silveton_vst3_host_integration_tests artifact/
-          cp build/Release/silveton_vst3_infrastructure_tests artifact/
-          cp build/Release/silveton_coreaudio_smoke artifact/
-          cp build/Release/libsilveton_audio_core.a artifact/
+          cp "$VST3_SCANNER" artifact/
+          cp "$VST3_HOST_TESTS" artifact/
+          cp "$VST3_INFRA_TESTS" artifact/
+          cp "$CORE_AUDIO_SMOKE" artifact/
+          cp "$AUDIO_CORE_LIB" artifact/
           ditto "$PLUGIN" "artifact/SilvetonHostTest.vst3"
           cp _silveton_src/SilvetonDAW/VST3_LAYER_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
