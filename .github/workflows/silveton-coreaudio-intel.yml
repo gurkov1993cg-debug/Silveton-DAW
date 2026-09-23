@@ -108,7 +108,7 @@ jobs:
       - name: Run VST3 host integration explicitly
         run: |
           set -euxo pipefail
-          "$VST3_HOST_TESTS" "$PLUGIN"
+          "$VST3_HOST_TESTS" "$PLUGIN" "$VST3_SCANNER"
 
       - name: Run Steinberg validator explicitly
         run: |
