@@ -5,11 +5,12 @@ on:
   push:
     paths:
       - 'SilvetonDAW-source.zip'
+      - '.github/workflows/silveton-coreaudio-intel.yml'
 
 jobs:
   intel-vst3:
     runs-on: macos-15-intel
-    timeout-minutes: 45
+    timeout-minutes: 55
 
     steps:
       - name: Checkout Silveton package
@@ -18,14 +19,14 @@ jobs:
       - name: Select Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
 
-      - name: Show toolchain
+      - name: Show locked toolchain
         run: |
           set -euxo pipefail
           sw_vers
           xcodebuild -version
           cmake --version
           clang++ --version
-          uname -m
+          test "$(uname -m)" = "x86_64"
 
       - name: Extract source ZIP
         run: |
@@ -34,12 +35,16 @@ jobs:
           rm -rf _silveton_src
           mkdir _silveton_src
           ditto -x -k SilvetonDAW-source.zip _silveton_src
-          test -f _silveton_src/SilvetonDAW/CMakeLists.txt
-          test -f _silveton_src/SilvetonDAW/src/Vst3Host.cpp
-          test -f _silveton_src/SilvetonDAW/src/Vst3Runtime.cpp
-          test -f _silveton_src/SilvetonDAW/src/ProcessorGraph.cpp
-          test -f _silveton_src/SilvetonDAW/tests/Vst3HostIntegrationTests.cpp
-          test -f _silveton_src/SilvetonDAW/tests/vst3/SilvetonHostTest.cpp
+          ROOT="_silveton_src/SilvetonDAW"
+          test -f "$ROOT/CMakeLists.txt"
+          test -f "$ROOT/app/SilvetonApp.mm"
+          test -f "$ROOT/src/AudioEngine.cpp"
+          test -f "$ROOT/src/ProcessorGraph.cpp"
+          test -f "$ROOT/src/Vst3Host.cpp"
+          test -f "$ROOT/src/CoreMidiInput.mm"
+          test -f "$ROOT/tests/Vst3HostIntegrationTests.cpp"
+          test -f "$ROOT/tests/vst3/SilvetonHostTest.cpp"
+          grep -F 'project(SilvetonDAW VERSION 0.16.0' "$ROOT/CMakeLists.txt"
 
       - name: Checkout exact pinned Steinberg VST3 SDK
         run: |
@@ -56,8 +61,9 @@ jobs:
       - name: Verify macOS 10.13 source contract
         run: |
           set -euxo pipefail
+          ROOT="_silveton_src/SilvetonDAW"
           if grep -R --line-number --include='*.h' --include='*.cpp' --include='*.mm' 'std::filesystem' \
-              _silveton_src/SilvetonDAW/include _silveton_src/SilvetonDAW/src _silveton_src/SilvetonDAW/tests; then
+              "$ROOT/include" "$ROOT/src" "$ROOT/tests" "$ROOT/app"; then
             echo 'std::filesystem is not allowed for the macOS 10.13 target'
             exit 1
           fi
@@ -81,67 +87,62 @@ jobs:
       - name: Run complete Release regression suite
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Run Steinberg validator explicitly on deterministic fixture
+      - name: Resolve native outputs
         run: |
           set -euxo pipefail
+          APP="$(find build -type d -name 'Silveton.app' -print -quit)"
           PLUGIN="$(find build -type d -name 'SilvetonHostTest.vst3' -print -quit)"
           VALIDATOR="$(find build -type f -name validator -perm -111 -print -quit)"
-          test -n "$PLUGIN"
-          test -n "$VALIDATOR"
-          "$VALIDATOR" "$PLUGIN"
-          echo "PLUGIN=$PLUGIN" >> "$GITHUB_ENV"
-
-      - name: Verify VST3 bundle signing and executable
-        run: |
-          set -euxo pipefail
-          test -d "$PLUGIN"
-          codesign --verify --deep --strict --verbose=2 "$PLUGIN"
-          PLUGIN_BIN="$(find "$PLUGIN/Contents/MacOS" -type f -perm -111 -print -quit)"
-          test -n "$PLUGIN_BIN"
-          file "$PLUGIN_BIN"
-          lipo -info "$PLUGIN_BIN"
-          otool -l "$PLUGIN_BIN" | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
-          nm -gU "$PLUGIN_BIN" | grep GetPluginFactory
-
-      - name: Resolve Release output paths
-        run: |
-          set -euxo pipefail
           CORE_AUDIO_SMOKE="$(find build -type f -name 'silveton_coreaudio_smoke' -perm -111 -print -quit)"
           VST3_SCANNER="$(find build -type f -name 'silveton_vst3_scanner' -perm -111 -print -quit)"
           VST3_HOST_TESTS="$(find build -type f -name 'silveton_vst3_host_integration_tests' -perm -111 -print -quit)"
           VST3_INFRA_TESTS="$(find build -type f -name 'silveton_vst3_infrastructure_tests' -perm -111 -print -quit)"
           AUDIO_CORE_LIB="$(find build -type f -name 'libsilveton_audio_core.a' -print -quit)"
+          for v in APP PLUGIN VALIDATOR CORE_AUDIO_SMOKE VST3_SCANNER VST3_HOST_TESTS VST3_INFRA_TESTS AUDIO_CORE_LIB; do
+            test -n "${!v}"
+            echo "$v=${!v}" >> "$GITHUB_ENV"
+          done
+          test -x "$APP/Contents/MacOS/Silveton"
+          test -x "$APP/Contents/Resources/silveton_vst3_scanner"
 
-          test -n "$CORE_AUDIO_SMOKE"
-          test -n "$VST3_SCANNER"
-          test -n "$VST3_HOST_TESTS"
-          test -n "$VST3_INFRA_TESTS"
-          test -n "$AUDIO_CORE_LIB"
-
-          echo "CORE_AUDIO_SMOKE=$CORE_AUDIO_SMOKE" >> "$GITHUB_ENV"
-          echo "VST3_SCANNER=$VST3_SCANNER" >> "$GITHUB_ENV"
-          echo "VST3_HOST_TESTS=$VST3_HOST_TESTS" >> "$GITHUB_ENV"
-          echo "VST3_INFRA_TESTS=$VST3_INFRA_TESTS" >> "$GITHUB_ENV"
-          echo "AUDIO_CORE_LIB=$AUDIO_CORE_LIB" >> "$GITHUB_ENV"
-
-      - name: Run CoreAudio enumeration smoke
+      - name: Run VST3 host integration explicitly
         run: |
           set -euxo pipefail
-          "$CORE_AUDIO_SMOKE"
+          "$VST3_HOST_TESTS" "$PLUGIN"
 
-      - name: Verify Intel host executables and deployment target
+      - name: Run Steinberg validator explicitly
         run: |
           set -euxo pipefail
-          for f in \
-            "$CORE_AUDIO_SMOKE" \
-            "$VST3_SCANNER" \
-            "$VST3_HOST_TESTS" \
-            "$VST3_INFRA_TESTS"; do
+          "$VALIDATOR" "$PLUGIN"
+
+      - name: Sign and verify native bundles
+        run: |
+          set -euxo pipefail
+          codesign --force --deep --sign - "$PLUGIN"
+          codesign --verify --deep --strict --verbose=2 "$PLUGIN"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Verify x86_64-only and macOS 10.13 deployment
+        run: |
+          set -euxo pipefail
+          APP_BIN="$APP/Contents/MacOS/Silveton"
+          PLUGIN_BIN="$(find "$PLUGIN/Contents/MacOS" -type f -perm -111 -print -quit)"
+          for f in "$APP_BIN" "$PLUGIN_BIN" "$CORE_AUDIO_SMOKE" "$VST3_SCANNER" "$VST3_HOST_TESTS" "$VST3_INFRA_TESTS"; do
             test -f "$f"
             file "$f"
-            lipo -info "$f"
-            otool -l "$f" | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+            lipo -info "$f" | tee /tmp/lipo.txt
+            grep -q 'x86_64' /tmp/lipo.txt
+            ! grep -Eq 'arm64|i386' /tmp/lipo.txt
+            otool -l "$f" > /tmp/otool.txt
+            grep -A6 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' /tmp/otool.txt
+            grep -Eq '10\.13|10\.13\.0' /tmp/otool.txt
           done
+          nm -gU "$PLUGIN_BIN" | grep GetPluginFactory
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" | grep '^0.16.0$'
+
+      - name: Run CoreAudio enumeration smoke
+        run: "$CORE_AUDIO_SMOKE"
 
       - name: Configure ASan + UBSan VST3 build
         run: |
@@ -166,24 +167,23 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build-san -C Debug --output-on-failure
 
-      - name: Package VST3 layer validation artifact
+      - name: Package validation artifact
         run: |
           set -euxo pipefail
-          rm -rf artifact SilvetonDAW-VST3-Intel-validation.zip
+          rm -rf artifact SilvetonDAW-Intel-validation.zip
           mkdir artifact
-          cp "$VST3_SCANNER" artifact/
-          cp "$VST3_HOST_TESTS" artifact/
-          cp "$VST3_INFRA_TESTS" artifact/
-          cp "$CORE_AUDIO_SMOKE" artifact/
-          cp "$AUDIO_CORE_LIB" artifact/
+          ditto "$APP" "artifact/Silveton.app"
           ditto "$PLUGIN" "artifact/SilvetonHostTest.vst3"
+          cp "$VST3_SCANNER" "$VST3_HOST_TESTS" "$VST3_INFRA_TESTS" "$CORE_AUDIO_SMOKE" "$AUDIO_CORE_LIB" artifact/
+          cp _silveton_src/SilvetonDAW/CURRENT_DEVELOPMENT_STATUS.md artifact/
+          cp _silveton_src/SilvetonDAW/GUI_WORKFLOW_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/VST3_LAYER_STATUS.md artifact/
           cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
-          ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-VST3-Intel-validation.zip
+          ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-Intel-validation.zip
 
       - name: Upload validation artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SilvetonDAW-VST3-Intel-validation
-          path: SilvetonDAW-VST3-Intel-validation.zip
+          name: SilvetonDAW-Intel-validation
+          path: SilvetonDAW-Intel-validation.zip
           if-no-files-found: error
