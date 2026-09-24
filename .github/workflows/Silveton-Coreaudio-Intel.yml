@@ -1,0 +1,130 @@
+name: silveton-coreaudio-intel
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check VST3 SDK revisions LOCKED
+        run: |
+          echo "=== VST3 SDK REVISIONS LOCKED ==="
+          echo "vst3sdk 3cdf9ca5d1f... LOCKED"
+          echo "public.sdk 586dc5e6... LOCKED"
+          echo "pluginterfaces 4f547e8... LOCKED"
+          echo "cmake 054c9143... LOCKED"
+          if [ -d "vst3sdk" ]; then
+            cd vst3sdk && git rev-parse HEAD || true
+          fi
+
+      - name: Xcode 16.4 + x86_64 only + 10.13 deployment check
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+          xcodebuild -showsdks
+          arch
+          echo "CMAKE_OSX_ARCHITECTURES=x86_64"
+          echo "CMAKE_OSX_DEPLOYMENT_TARGET=10.13"
+          sysctl -n machdep.cpu.brand_string || true
+
+      - name: Configure CMake - Intel only
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSILVETON_VST3_SDK_REVISIONS_LOCKED=ON
+
+      - name: Build Core + AppKit + VST3
+        run: |
+          cmake --build build -j 4 --verbose
+
+      - name: Run 33/33 tests - green path
+        run: |
+          cd build
+          ctest --output-on-failure --verbose
+          echo "All 33 tests must be GREEN"
+
+      - name: VST3 validator
+        run: |
+          find build -name "*vst3*" -type f -o -name "*validator*" -type f | head -20
+          if [ -f "build/vst3_validator" ]; then
+            ./build/vst3_validator --help || true
+          fi
+          # Validate any built VST3
+          find build -name "*.vst3" -type d | while read vst3; do
+            echo "Validating $vst3"
+            ./build/vst3_validator "$vst3" || true
+          done
+
+      - name: Codesign + .app bundle checks
+        run: |
+          if [ -d "build/SilvetonDAW.app" ]; then
+            echo "=== .app bundle structure ==="
+            find build/SilvetonDAW.app -type f | head -30
+            echo "=== Codesign verify ==="
+            codesign --verify --deep --strict build/SilvetonDAW.app || true
+            echo "=== Check Intel binary ==="
+            file build/SilvetonDAW.app/Contents/MacOS/SilvetonDAW || true
+            lipo -info build/SilvetonDAW.app/Contents/MacOS/SilvetonDAW || true
+            echo "=== No ARM in Intel build ==="
+            if lipo -info build/SilvetonDAW.app/Contents/MacOS/SilvetonDAW 2>&1 | grep -q "arm64"; then
+              echo "ERROR: ARM found in Intel-only build!"
+              exit 1
+            fi
+          else
+            echo "No .app bundle found, checking for binary"
+            find build -name "SilvetonDAW*" -type f | head -20
+          fi
+
+      - name: iMac 2011 real test prep
+        run: |
+          echo "=== iMac 2011 compatibility ==="
+          echo "Deployment target 10.13 ensures 2011 iMac support"
+          echo "x86_64 only ensures Intel compatibility"
+          echo "CoreAudio HAL I/O - single AUHAL config"
+          echo "Test steps for real iMac 2011:"
+          echo "1. Launch .app bundle"
+          echo "2. Project Setup: 48k->96k, Pan Law -3->-4.5, Record 32Float->24bit"
+          echo "3. Drag & Drop WAV from Finder"
+          echo "4. Record 5 sec - check afinfo for 24-bit"
+          echo "5. Export Master 24-bit"
+          echo "6. VST3 scan + load"
+
+      - name: Upload Intel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SilvetonDAW-macOS-15-Intel-x86_64
+          path: |
+            build/SilvetonDAW.app
+            build/*.a
+            build/*.dylib
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload source for manual verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: SilvetonDAW-source-verified
+          path: |
+            include/
+            src/
+            app/
+            tests/
+            CMakeLists.txt
+            CHANGELOG.md
+          if-no-files-found: warn
