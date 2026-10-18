@@ -181,9 +181,13 @@ jobs:
           cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
           ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-Intel-validation.zip
 
+      # The package above is already ONE ready zip (ditto keeps the app bundle
+      # intact). `archive: false` uploads that file as it is, so GitHub does not
+      # wrap it in a second zip: what you download is SilvetonDAW-Intel-validation.zip
+      # itself. (With archive: false the file name is the download name.)
       - name: Upload validation artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: SilvetonDAW-Intel-validation
           path: SilvetonDAW-Intel-validation.zip
+          archive: false
           if-no-files-found: error
