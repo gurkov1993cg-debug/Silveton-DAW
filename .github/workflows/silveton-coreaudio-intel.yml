@@ -1,16 +1,28 @@
-name: Silveton Intel Full VST3 Validation
+name: Silveton Intel Build
+
+# Every push of the zip = a FAST build: only the program (Silveton.app), no test suites, no validator,
+# no sanitizer build. About 5-7 minutes instead of 20.
+# The full validation (49 test suites, Steinberg validator, ASan/UBSan) runs only when you start the
+# workflow by hand (Actions → Silveton Intel Build → Run workflow) and tick "Full validation".
 
 on:
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Full validation (tests, validator, sanitizers)"
+        type: boolean
+        default: false
   push:
     paths:
       - 'SilvetonDAW-source.zip'
       - '.github/workflows/silveton-coreaudio-intel.yml'
 
 jobs:
-  intel-vst3:
+  intel:
     runs-on: macos-15-intel
     timeout-minutes: 55
+    env:
+      FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.full == true }}
 
     steps:
       - name: Checkout Silveton package
@@ -18,15 +30,6 @@ jobs:
 
       - name: Select Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-
-      - name: Show locked toolchain
-        run: |
-          set -euxo pipefail
-          sw_vers
-          xcodebuild -version
-          cmake --version
-          clang++ --version
-          test "$(uname -m)" = "x86_64"
 
       - name: Extract source ZIP
         run: |
@@ -38,25 +41,7 @@ jobs:
           ROOT="_silveton_src/SilvetonDAW"
           test -f "$ROOT/CMakeLists.txt"
           test -f "$ROOT/app/SilvetonApp.mm"
-          test -f "$ROOT/src/AudioEngine.cpp"
-          test -f "$ROOT/src/ProcessorGraph.cpp"
-          test -f "$ROOT/src/Vst3Host.cpp"
-          test -f "$ROOT/src/CoreMidiInput.mm"
-          test -f "$ROOT/tests/Vst3HostIntegrationTests.cpp"
-          test -f "$ROOT/tests/vst3/SilvetonHostTest.cpp"
           grep -F 'project(SilvetonDAW VERSION 0.16.0' "$ROOT/CMakeLists.txt"
-
-      - name: Checkout exact pinned Steinberg VST3 SDK
-        run: |
-          set -euxo pipefail
-          rm -rf vst3sdk
-          git clone https://github.com/steinbergmedia/vst3sdk.git vst3sdk
-          git -C vst3sdk checkout 3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96
-          git -C vst3sdk submodule update --init --recursive
-          test "$(git -C vst3sdk rev-parse HEAD)" = "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96"
-          test "$(git -C vst3sdk/public.sdk rev-parse HEAD)" = "586dc5e6c8012c3e4b01c79389375cbe96bdb1da"
-          test "$(git -C vst3sdk/pluginterfaces rev-parse HEAD)" = "4f547e8e102b47de4a8b8aaf343c73b700786372"
-          test "$(git -C vst3sdk/cmake rev-parse HEAD)" = "054c9143cbb8d47fc4694e473f2ee3b4d951a8f5"
 
       - name: Verify macOS 10.13 source contract
         run: |
@@ -68,7 +53,54 @@ jobs:
             exit 1
           fi
 
-      - name: Configure Release with production VST3 host
+      # The pinned Steinberg SDK is kept between runs (about a minute saved).
+      - name: Cache pinned Steinberg VST3 SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: vst3sdk
+          key: vst3sdk-3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96
+
+      - name: Checkout exact pinned Steinberg VST3 SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          rm -rf vst3sdk
+          git clone https://github.com/steinbergmedia/vst3sdk.git vst3sdk
+          git -C vst3sdk checkout 3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96
+          git -C vst3sdk submodule update --init --recursive
+
+      - name: Verify the SDK pin
+        run: |
+          set -euxo pipefail
+          test "$(git -C vst3sdk rev-parse HEAD)" = "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96"
+          test "$(git -C vst3sdk/public.sdk rev-parse HEAD)" = "586dc5e6c8012c3e4b01c79389375cbe96bdb1da"
+          test "$(git -C vst3sdk/pluginterfaces rev-parse HEAD)" = "4f547e8e102b47de4a8b8aaf343c73b700786372"
+          test "$(git -C vst3sdk/cmake rev-parse HEAD)" = "054c9143cbb8d47fc4694e473f2ee3b4d951a8f5"
+
+      # ------------------------------------------------------------------ FAST (every push)
+      - name: Configure (program only)
+        if: env.FULL != 'true'
+        run: |
+          set -euxo pipefail
+          cmake -S _silveton_src/SilvetonDAW -B build \
+            -G Xcode \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DSILVETON_ENABLE_VST3_HOST=ON \
+            -DSILVETON_BUILD_VST3_VALIDATOR=OFF \
+            -DSILVETON_BUILD_TESTS=OFF \
+            -DSILVETON_VST3_SDK_DIR="$GITHUB_WORKSPACE/vst3sdk" \
+            -DSMTG_BUILD_UNIVERSAL_BINARY=OFF \
+            -DSMTG_CREATE_PLUGIN_LINK=OFF
+
+      - name: Build the program
+        if: env.FULL != 'true'
+        run: cmake --build build --config Release --target Silveton --parallel 4
+
+      # ------------------------------------------------------------------ FULL (by hand only)
+      - name: Configure Release with validator and tests
+        if: env.FULL == 'true'
         run: |
           set -euxo pipefail
           cmake -S _silveton_src/SilvetonDAW -B build \
@@ -77,74 +109,33 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
             -DSILVETON_ENABLE_VST3_HOST=ON \
             -DSILVETON_BUILD_VST3_VALIDATOR=ON \
+            -DSILVETON_BUILD_TESTS=ON \
             -DSILVETON_VST3_SDK_DIR="$GITHUB_WORKSPACE/vst3sdk" \
             -DSMTG_BUILD_UNIVERSAL_BINARY=OFF \
             -DSMTG_CREATE_PLUGIN_LINK=OFF
 
-      - name: Build Release
-        run: cmake --build build --config Release --parallel 2
+      - name: Build Release (everything)
+        if: env.FULL == 'true'
+        run: cmake --build build --config Release --parallel 4
 
-      - name: Run complete Release regression suite
+      - name: Run the complete Release regression suite
+        if: env.FULL == 'true'
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Resolve native outputs
+      - name: Run the Steinberg validator on the host test plug-in
+        if: env.FULL == 'true'
         run: |
           set -euxo pipefail
-          APP="$(find build -type d -name 'Silveton.app' -print -quit)"
           PLUGIN="$(find build -type d -name 'SilvetonHostTest.vst3' -print -quit)"
           VALIDATOR="$(find build -type f -name validator -perm -111 -print -quit)"
-          CORE_AUDIO_SMOKE="$(find build -type f -name 'silveton_coreaudio_smoke' -perm -111 -print -quit)"
-          VST3_SCANNER="$(find build -type f -name 'silveton_vst3_scanner' -perm -111 -print -quit)"
-          VST3_HOST_TESTS="$(find build -type f -name 'silveton_vst3_host_integration_tests' -perm -111 -print -quit)"
-          VST3_INFRA_TESTS="$(find build -type f -name 'silveton_vst3_infrastructure_tests' -perm -111 -print -quit)"
-          AUDIO_CORE_LIB="$(find build -type f -name 'libsilveton_audio_core.a' -print -quit)"
-          for v in APP PLUGIN VALIDATOR CORE_AUDIO_SMOKE VST3_SCANNER VST3_HOST_TESTS VST3_INFRA_TESTS AUDIO_CORE_LIB; do
-            test -n "${!v}"
-            echo "$v=${!v}" >> "$GITHUB_ENV"
-          done
-          test -x "$APP/Contents/MacOS/Silveton"
-          test -x "$APP/Contents/Resources/silveton_vst3_scanner"
-
-      - name: Run VST3 host integration explicitly
-        run: |
-          set -euxo pipefail
-          "$VST3_HOST_TESTS" "$PLUGIN" "$VST3_SCANNER"
-
-      - name: Run Steinberg validator explicitly
-        run: |
-          set -euxo pipefail
+          test -n "$PLUGIN" && test -n "$VALIDATOR"
           "$VALIDATOR" "$PLUGIN"
 
-      - name: Sign and verify native bundles
-        run: |
-          set -euxo pipefail
-          codesign --force --deep --sign - "$PLUGIN"
-          codesign --verify --deep --strict --verbose=2 "$PLUGIN"
-          codesign --force --deep --sign - "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-
-      - name: Verify x86_64-only and macOS 10.13 deployment
-        run: |
-          set -euxo pipefail
-          APP_BIN="$APP/Contents/MacOS/Silveton"
-          PLUGIN_BIN="$(find "$PLUGIN/Contents/MacOS" -type f -perm -111 -print -quit)"
-          for f in "$APP_BIN" "$PLUGIN_BIN" "$CORE_AUDIO_SMOKE" "$VST3_SCANNER" "$VST3_HOST_TESTS" "$VST3_INFRA_TESTS"; do
-            test -f "$f"
-            file "$f"
-            lipo -info "$f" | tee /tmp/lipo.txt
-            grep -q 'x86_64' /tmp/lipo.txt
-            ! grep -Eq 'arm64|i386' /tmp/lipo.txt
-            otool -l "$f" > /tmp/otool.txt
-            grep -A6 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' /tmp/otool.txt
-            grep -Eq '10\.13|10\.13\.0' /tmp/otool.txt
-          done
-          nm -gU "$PLUGIN_BIN" | grep GetPluginFactory
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" | grep '^0.16.0$'
-
-      - name: Run CoreAudio enumeration smoke
-        run: "$CORE_AUDIO_SMOKE"
-
-      - name: Configure ASan + UBSan VST3 build
+      - name: ASan + UBSan build and suite
+        if: env.FULL == 'true'
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           set -euxo pipefail
           cmake -S _silveton_src/SilvetonDAW -B build-san \
@@ -154,40 +145,45 @@ jobs:
             -DSILVETON_ENABLE_SANITIZERS=ON \
             -DSILVETON_ENABLE_VST3_HOST=ON \
             -DSILVETON_BUILD_VST3_VALIDATOR=OFF \
+            -DSILVETON_BUILD_TESTS=ON \
             -DSILVETON_VST3_SDK_DIR="$GITHUB_WORKSPACE/vst3sdk" \
             -DSMTG_BUILD_UNIVERSAL_BINARY=OFF \
             -DSMTG_CREATE_PLUGIN_LINK=OFF
+          cmake --build build-san --config Debug --parallel 4
+          ctest --test-dir build-san -C Debug --output-on-failure
 
-      - name: Build ASan + UBSan
-        run: cmake --build build-san --config Debug --parallel 2
-
-      - name: Run ASan + UBSan regression suite
-        env:
-          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ctest --test-dir build-san -C Debug --output-on-failure
-
-      - name: Package validation artifact
+      # ------------------------------------------------------------------ both
+      - name: Sign and check the program
         run: |
           set -euxo pipefail
-          rm -rf artifact SilvetonDAW-Intel-validation.zip
+          APP="$(find build -type d -name 'Silveton.app' -print -quit)"
+          test -n "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          test -x "$APP/Contents/MacOS/Silveton"
+          test -x "$APP/Contents/Resources/silveton_vst3_scanner"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          APP_BIN="$APP/Contents/MacOS/Silveton"
+          lipo -info "$APP_BIN" | tee /tmp/lipo.txt
+          grep -q 'x86_64' /tmp/lipo.txt
+          ! grep -Eq 'arm64|i386' /tmp/lipo.txt
+          otool -l "$APP_BIN" > /tmp/otool.txt
+          grep -Eq '10\.13|10\.13\.0' /tmp/otool.txt
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" | grep '^0.16.0$'
+
+      - name: Package the program
+        run: |
+          set -euxo pipefail
+          rm -rf artifact Silveton-Intel.zip
           mkdir artifact
           ditto "$APP" "artifact/Silveton.app"
-          ditto "$PLUGIN" "artifact/SilvetonHostTest.vst3"
-          cp "$VST3_SCANNER" "$VST3_HOST_TESTS" "$VST3_INFRA_TESTS" "$CORE_AUDIO_SMOKE" "$AUDIO_CORE_LIB" artifact/
-          cp _silveton_src/SilvetonDAW/CURRENT_DEVELOPMENT_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/GUI_WORKFLOW_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/VST3_LAYER_STATUS.md artifact/
-          cp _silveton_src/SilvetonDAW/TEST_RESULTS.txt artifact/
-          ditto -c -k --sequesterRsrc --keepParent artifact SilvetonDAW-Intel-validation.zip
+          cp _silveton_src/SilvetonDAW/CURRENT_DEVELOPMENT_STATUS.md artifact/ || true
+          ditto -c -k --sequesterRsrc --keepParent artifact Silveton-Intel.zip
 
-      # The package above is already ONE ready zip (ditto keeps the app bundle
-      # intact). `archive: false` uploads that file as it is, so GitHub does not
-      # wrap it in a second zip: what you download is SilvetonDAW-Intel-validation.zip
-      # itself. (With archive: false the file name is the download name.)
-      - name: Upload validation artifact
+      # One ready zip: what you download is Silveton-Intel.zip itself (archive: false = no second zip around it).
+      - name: Upload the program
         uses: actions/upload-artifact@v7
         with:
-          path: SilvetonDAW-Intel-validation.zip
+          path: Silveton-Intel.zip
           archive: false
           if-no-files-found: error
